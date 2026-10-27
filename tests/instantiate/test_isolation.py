@@ -50,6 +50,31 @@ def test_isolation_local_schema_pickling(recursive: bool) -> None:
     assert list(restored.sizes) == [1, 2, 3]
 
 
+def test_isolation_of_union_typed_container_argument() -> None:
+    @dataclass
+    class ModelConf:
+        _target_: str = f"{__name__}.Model"
+        sizes: list[int] | dict[str, int] = field(default_factory=lambda: [1, 2, 3])
+
+    isolated = instantiate(ModelConf, isolate=True, _execution_whitelist_=WHITELIST)
+
+    assert isinstance(isolated.sizes, ListConfig)
+    assert isolated.sizes._get_parent() is None
+    assert list(isolated.sizes) == [1, 2, 3]
+
+
+def test_isolation_of_union_selected_sequence() -> None:
+    @dataclass
+    class Config:
+        sizes: list[int] | dict[str, int] = field(default_factory=lambda: [1, 2, 3])
+
+    config = OmegaConf.structured(Config)
+
+    result = instantiate(config.sizes, isolate=True, _execution_whitelist_=WHITELIST)
+
+    assert list(result) == [1, 2, 3]
+
+
 @mark.parametrize("recursive", [True, False])
 @mark.parametrize("with_override", [True, False])
 def test_isolation_preserves_ancestor_resolution(

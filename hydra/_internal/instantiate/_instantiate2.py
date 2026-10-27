@@ -907,6 +907,9 @@ def _get_dict_override_merge_base(
 
 
 def _get_override_child(source: Any, key: Any) -> Any:
+    if isinstance(source, UnionNode):
+        # A union node holds its value as a keyless child.
+        return source._value()
     if isinstance(source, DictConfig):
         return source._get_node(key, validate_access=False)
     if OmegaConf.is_sequence(source):
@@ -1045,16 +1048,28 @@ def _copy_config_with_parent_context(config: Any) -> Any:
     copied_root = copy.deepcopy(current)
     copied_config = copied_root
     for key, source_config, parent_owns_source in reversed(path):
-        copied_config = _get_override_child(copied_config, key)
+        copied_parent = copied_config
+        copied_config = _get_override_child(copied_parent, key)
         # Merged nodes can retain a parent only as interpolation context.
         if not parent_owns_source:
             # This tree is a private copy, so it is safe to mutate even when it
             # retains read-only flags from the source configuration.
             merge_source = copy.deepcopy(source_config)
-            # Isolate the private source from flags inherited through its
-            # original parent while preserving that parent for interpolation.
-            merge_source._set_flags_root(True)
-            copied_config._merge_with(merge_source, _allow_readonly_target=True)
+            if isinstance(copied_parent, UnionNode):
+                # A union holds a single value, so the source replaces it.
+                merge_source._set_parent(copied_parent)
+                copied_parent.__dict__["_content"] = merge_source
+                copied_config = merge_source
+            elif isinstance(copied_config, UnionNode):
+                # A resolved union interpolation is not held by the union, so
+                # the source replaces the union.
+                _replace_child(copied_parent, key, merge_source)
+                copied_config = merge_source
+            else:
+                # Isolate the private source from flags inherited through its
+                # original parent while preserving that parent for interpolation.
+                merge_source._set_flags_root(True)
+                copied_config._merge_with(merge_source, _allow_readonly_target=True)
 
     return copied_config
 

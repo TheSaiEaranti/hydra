@@ -931,6 +931,230 @@ def test_missing_structured_root_overrides(
     assert config._is_missing()
 
 
+@mark.parametrize("isolate", [False, True])
+@mark.parametrize("selected", ["field", "list_item", "dict_value"])
+def test_callsite_arguments_for_union_selected_config(
+    instantiate_func: Any, isolate: bool, selected: str
+) -> None:
+    @dataclass
+    class First:
+        _target_: str = "tests.instantiate.ArgsClass"
+        lr: float = 0.001
+
+    @dataclass
+    class Second:
+        _target_: str = "tests.instantiate.ArgsClass"
+        lr: float = 0.1
+        momentum: float = 0.9
+
+    @dataclass
+    class Config:
+        optimizer: First | Second = field(default_factory=Second)
+        optimizers: list[First | Second] = field(default_factory=lambda: [Second()])
+        named: dict[str, First | Second] = field(
+            default_factory=lambda: {"second": Second()}
+        )
+
+    config = OmegaConf.structured(Config)
+    node = {
+        "field": config.optimizer,
+        "list_item": config.optimizers[0],
+        "dict_value": config.named.second,
+    }[selected]
+
+    result = instantiate_func(node, 10, lr=0.5, isolate=isolate)
+
+    assert result.args == (10,)
+    assert result.kwargs == {"lr": 0.5, "momentum": 0.9}
+    assert node.lr == 0.1
+
+
+@mark.parametrize("isolate", [False, True])
+def test_callsite_override_is_visible_through_union_interpolation(
+    instantiate_func: Any, isolate: bool
+) -> None:
+    @dataclass
+    class First:
+        _target_: str = "tests.instantiate.ArgsClass"
+        lr: float = 0.001
+        base: float = "${..base_lr}"  # type: ignore[assignment]
+        derived: float = "${optimizer.lr}"  # type: ignore[assignment]
+
+    @dataclass
+    class Second:
+        _target_: str = "tests.instantiate.ArgsClass"
+        momentum: float = 0.9
+
+    @dataclass
+    class Config:
+        base_lr: float = 0.01
+        optimizer: First | Second = field(default_factory=First)
+
+    config = OmegaConf.structured(Config)
+
+    result = instantiate_func(config.optimizer, lr=0.5, isolate=isolate)
+
+    assert result.kwargs == {"lr": 0.5, "base": 0.01, "derived": 0.5}
+    assert config.optimizer.lr == 0.001
+
+
+def test_partial_union_selected_config(instantiate_func: Any) -> None:
+    @dataclass
+    class First:
+        _target_: str = "tests.instantiate.ArgsClass"
+        lr: float = 0.001
+
+    @dataclass
+    class Second:
+        _target_: str = "tests.instantiate.ArgsClass"
+        momentum: float = 0.9
+
+    @dataclass
+    class Config:
+        optimizer: First | Second = field(default_factory=First)
+
+    config = OmegaConf.structured(Config)
+
+    factory = instantiate_func(config.optimizer, _partial_=True)
+
+    assert factory().kwargs == {"lr": 0.001}
+
+
+def test_union_selected_config_isolated_by_config(instantiate_func: Any) -> None:
+    @dataclass
+    class First:
+        _target_: str = "tests.instantiate.ArgsClass"
+        _isolate_: bool = True
+        lr: float = 0.001
+
+    @dataclass
+    class Second:
+        _target_: str = "tests.instantiate.ArgsClass"
+        momentum: float = 0.9
+
+    @dataclass
+    class Config:
+        optimizer: First | Second = field(default_factory=First)
+
+    config = OmegaConf.structured(Config)
+
+    result = instantiate_func(config.optimizer)
+
+    assert result.kwargs == {"lr": 0.001}
+
+
+def test_callsite_arguments_for_merged_union_member(instantiate_func: Any) -> None:
+    @dataclass
+    class First:
+        _target_: str = "tests.instantiate.ArgsClass"
+        lr: float = 0.001
+
+    @dataclass
+    class Second:
+        _target_: str = "tests.instantiate.ArgsClass"
+        lr: float = 0.1
+        momentum: float = 0.9
+        derived: float = "${optimizer.lr}"  # type: ignore[assignment]
+
+    @dataclass
+    class Config:
+        optimizer: First | Second = field(default_factory=Second)
+
+    config = OmegaConf.structured(Config)
+    merged = OmegaConf.merge(config.optimizer, {"momentum": 0.5})
+
+    result = instantiate_func(merged, lr=0.5)
+
+    assert result.kwargs == {"lr": 0.5, "momentum": 0.5, "derived": 0.5}
+
+
+@mark.parametrize("replace_with_other_member", [False, True])
+def test_callsite_arguments_for_replaced_union_member(
+    instantiate_func: Any, replace_with_other_member: bool
+) -> None:
+    @dataclass
+    class First:
+        _target_: str = "tests.instantiate.ArgsClass"
+        lr: float = 0.001
+        derived: float = "${optimizer.lr}"  # type: ignore[assignment]
+
+    @dataclass
+    class Second:
+        _target_: str = "tests.instantiate.ArgsClass"
+        momentum: float = 0.9
+
+    @dataclass
+    class Config:
+        optimizer: First | Second | None = field(default_factory=First)
+
+    config = OmegaConf.structured(Config)
+    node = config.optimizer
+    config.optimizer = Second() if replace_with_other_member else None
+
+    result = instantiate_func(node, lr=0.5)
+
+    assert result.kwargs == {"lr": 0.5, "derived": 0.5}
+
+
+def test_callsite_arguments_for_interpolated_union_member(
+    instantiate_func: Any,
+) -> None:
+    @dataclass
+    class First:
+        _target_: str = "tests.instantiate.ArgsClass"
+        lr: float = 0.001
+
+    @dataclass
+    class Second:
+        _target_: str = "tests.instantiate.ArgsClass"
+        momentum: float = 0.9
+
+    @dataclass
+    class Config:
+        default: First | None = field(default_factory=First)
+        optimizer: First | Second = "${default}"  # type: ignore[assignment]
+
+    config = OmegaConf.structured(Config)
+
+    result = instantiate_func(config.optimizer, lr=0.5)
+
+    assert result.kwargs == {"lr": 0.5}
+    assert config.default.lr == 0.001
+
+
+@mark.parametrize("member", ["merged", "replaced"])
+def test_context_only_union_member_keeps_readonly_flag(
+    instantiate_func: Any, member: str
+) -> None:
+    @dataclass
+    class First:
+        _target_: str = "tests.instantiate.ArgsClass"
+        lr: float = 0.001
+        payload: dict[str, int] = field(default_factory=lambda: {"value": 1})
+
+    @dataclass
+    class Second:
+        _target_: str = "tests.instantiate.ArgsClass"
+        momentum: float = 0.9
+
+    @dataclass
+    class Config:
+        optimizer: First | Second | None = field(default_factory=First)
+
+    config = OmegaConf.structured(Config)
+    if member == "merged":
+        OmegaConf.set_readonly(config, True)
+        node = OmegaConf.merge(config.optimizer, {"lr": 0.2})
+    else:
+        node = config.optimizer
+        config.optimizer = None
+        OmegaConf.set_readonly(config, True)
+
+    result = instantiate_func(node, lr=0.5, _recursive_=False)
+
+    assert OmegaConf.is_readonly(result.kwargs["payload"])
+
+
 @mark.parametrize("convert_to_list", [True, False])
 @mark.parametrize(
     "input_conf, passthrough, expected",

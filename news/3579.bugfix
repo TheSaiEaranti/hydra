@@ -1,0 +1,1 @@
+Fix instantiate() call-site arguments and isolation for union-typed configs.
